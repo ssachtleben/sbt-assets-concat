@@ -8,16 +8,18 @@ import collection.mutable
 import mutable.ListBuffer
 import sbt._
 import Keys._
+import java.util.regex.Pattern
 import scala.collection.SortedMap
 import scala.collection.immutable.TreeMap
 import scala.collection.immutable.ListMap
 
 object Import {
 
-  val concat = TaskKey[Pipeline.Stage]("js transformer", "transforms js")
+  val concat = TaskKey[Pipeline.Stage]("assets-concat", "concat specified assets")
 
   object Concat {
     val groups = SettingKey[Seq[ConcatGroup]]("web-concat-groups", "List of ConcatGroup items")
+    val srcDirs = SettingKey[Seq[java.io.File]]("web-src-dirs", "List of source directories")
   }
 
   def group(o: AnyRef): Either[Seq[String], PathFinder] = o match {
@@ -43,32 +45,37 @@ object AssetsPlugin extends sbt.AutoPlugin {
 
   override def projectSettings: Seq[Setting[_]] = Seq(
     groups := ListBuffer.empty[ConcatGroup],
+    srcDirs := Seq.empty[java.io.File],
+    resourceManaged in concat in Assets := webTarget.value / concat.key.label / "main",
+    resourceManaged in concat in TestAssets := webTarget.value / concat.key.label / "test",
     includeFilter in concat := "*.js",
     excludeFilter in concat := HiddenFileFilter,
     concat := transformFiles.value)
 
-  private def toFileNames(logger: Logger, values: Seq[ConcatGroup],
-    srcDirs: Seq[File],
-    webModuleDirs: Seq[File],
-    publicDirs: Seq[File]): Seq[(String, Iterable[String])] = values.map {
+  private def toFileNames(logger: Logger, values: Seq[ConcatGroup], mappings: Seq[PathMapping],
+    srcDirs: Seq[File]): Seq[(String, Iterable[String])] = values.map {
     case (groupName, fileNames) =>
-      logger.info(groupName + " - " + fileNames.toString())
+      var groupNameEscaped = groupName.replace('/', java.io.File.separator.charAt(0))
+      //logger.info("Concat: " + groupNameEscaped + " -> " + fileNames.toString())
       fileNames match {
-        case Left(fileNamesSeq) => (groupName, fileNamesSeq)
+        case Left(fileNamesSeq) => (groupNameEscaped, fileNamesSeq)
         case Right(fileNamesPathFinder) =>
-          val r = fileNamesPathFinder.pair(relativeTo(srcDirs ++ webModuleDirs ++ publicDirs) | flat)
-          (groupName, ListMap(r: _*).values) // use ListMap to preserve insert order (not efficient, maybe there is a better solution)
+          val r = fileNamesPathFinder.pair(relativeTo(srcDirs) | flat)
+          (groupNameEscaped, ListMap(r: _*).values) // use ListMap to preserve insert order (not efficient, maybe there is a better solution)
         case u => sys.error(s"Expected Seq[String] or PathFinder, but got $u")
       }
   }
 
   def transformFiles: Def.Initialize[Task[Pipeline.Stage]] = Def.task { (mappings: Seq[PathMapping]) =>
+    //streams.value.log.info("Mapping: " + mappings.toString)
     var reducedMappings = Seq.empty[PathMapping]
+    var newMappings = Seq.empty[PathMapping]
+    val outputfolder = (resourceManaged in concat in Assets).value
     val targetDir = (public in Assets).value / "javascripts"
-    val groupsValue = toFileNames(streams.value.log, groups.value,
-      (sourceDirectories in Assets).value,
-      (webModuleDirectories in Assets).value,
-      Seq[File]((public in Assets).value))
+    val groupsValue = toFileNames(streams.value.log, groups.value, mappings, srcDirs.value)
+      //(sourceDirectories in Assets).value,
+      //(webModuleDirectories in Assets).value,
+      //Seq[File]((public in Assets).value))
     val concatGroups = mutable.Map.empty[String, StringBuilder]
     streams.value.log.info(s"Building ${groupsValue.size} concat group(s)")
     if (groupsValue.size > 0) {
@@ -76,22 +83,28 @@ object AssetsPlugin extends sbt.AutoPlugin {
 	      case (groupName, fileNames) =>
 	        if (fileNames.size > 0) {
 		        fileNames.foreach { fileName =>
-		          streams.value.log.info("Concat " + groupName + " <- " + fileName)		          
-		          reducedMappings = reducedMappings ++ mappings.filter(f => { f._2.equals(fileName) })
-		          val file = new java.io.File(targetDir, groupName)
-		          concatGroups.getOrElseUpdate(groupName, new StringBuilder)
-		            .append(IO.read(new java.io.File((public in Assets).value, fileName)) + System.lineSeparator)
+		          val entries = mappings.filter(f => { f._2.equals(fileName) })
+		          if (!entries.isEmpty) {
+			          //streams.value.log.info("Concat " + groupName + " <- " + entries.head._1)		          
+			          reducedMappings = reducedMappings ++ entries
+			          val file = new java.io.File(targetDir, groupName)
+			          concatGroups.getOrElseUpdate(groupName, new StringBuilder)
+			            .append(IO.read(entries.head._1) + System.lineSeparator)
+		          }
 		        }
 	        }
 	    }
     }
     
     concatGroups.map {
-          case (groupName, concatenatedContents) =>
-        val outputFile = targetDir / groupName
+      case (groupName, concatenatedContents) =>
+        val outputFile = outputfolder / groupName
+        	val newEntry = Seq.apply((outputFile, groupName));
+        	//streams.value.log.info("Entry " + newEntry.toString())
+        	newMappings = newMappings ++ newEntry
             IO.write(outputFile, concatenatedContents.toString())
             outputFile
         }.pair(relativeTo(webTarget.value))
-    (mappings.toSet -- reducedMappings.toSet).toSeq
+    (mappings.toSet -- reducedMappings.toSet ++ newMappings.toSet).toSeq
   }
 }
