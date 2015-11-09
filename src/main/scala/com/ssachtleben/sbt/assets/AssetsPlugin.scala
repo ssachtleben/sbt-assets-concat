@@ -1,5 +1,7 @@
 package com.ssachtleben.sbt.assets
 
+import java.nio.charset.Charset
+
 import com.typesafe.sbt.web.pipeline.Pipeline
 import com.typesafe.sbt.web.{PathMapping, SbtWeb}
 import sbt.Keys._
@@ -34,6 +36,8 @@ object AssetsPlugin extends sbt.AutoPlugin {
   override def trigger = AllRequirements
 
   val autoImport = Import
+
+  val utf8 = Charset.forName("UTF-8")
 
   import SbtWeb.autoImport._
   import WebKeys._
@@ -113,7 +117,7 @@ object AssetsPlugin extends sbt.AutoPlugin {
                 if (!entries.isEmpty) {
                   //streams.value.log.info("Concat " + groupName + " <- " + entries.head._1)
                   concatGroups.getOrElseUpdate(groupName, new StringBuilder)
-                    .append(IO.read(entries.head._1) + System.lineSeparator)
+                    .append(IO.read(entries.head._1,utf8) + System.lineSeparator)
                 }
               }
             } else {
@@ -130,7 +134,7 @@ object AssetsPlugin extends sbt.AutoPlugin {
         val newEntry = Seq.apply((outputFile, groupName))
         //streams.value.log.info("Entry " + newEntry.toString())
         newMappings = newMappings ++ newEntry
-        IO.write(outputFile, concatenatedContents.toString())
+        IO.write(outputFile, concatenatedContents.toString(),utf8)
         outputFile
     }.pair(relativeTo(webTarget.value))
     (mappings.toSet -- reducedMappings.toSet ++ newMappings.toSet).toSeq
