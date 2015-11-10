@@ -2,12 +2,12 @@ package com.ssachtleben.sbt.assets
 
 import java.nio.charset.Charset
 
-import akka.dispatch.ThreadPoolConfig
 import com.typesafe.sbt.web.pipeline.Pipeline
 import com.typesafe.sbt.web.{PathMapping, SbtWeb}
 import sbt.Keys._
 import sbt._
 
+import scala.StringBuilder
 import scala.collection.immutable.ListMap
 import scala.collection.mutable
 import scala.collection.mutable.ListBuffer
@@ -81,7 +81,7 @@ object AssetsPlugin extends sbt.AutoPlugin {
     //(sourceDirectories in Assets).value,
     //(webModuleDirectories in Assets).value,
     //Seq[File]((public in Assets).value))
-    val concatGroups = mutable.Map.empty[String, StringBuilder]
+
     streams.value.log.info(s"Building ${groupsValue.size} concat group(s)")
     //TODO only write groups when sources have changed
 
@@ -119,6 +119,7 @@ object AssetsPlugin extends sbt.AutoPlugin {
             }
 
             if (changed) {
+              val builder = new StringBuilder()
               // Write fileContent to concatGroups Map
               fileNames.foreach { fileName =>
                 //TODO call mappings filter only one time
@@ -127,36 +128,23 @@ object AssetsPlugin extends sbt.AutoPlugin {
                 })
                 if (!entries.isEmpty) {
                   //streams.value.log.info("Concat " + groupName + " <- " + entries.head._1)
-                  concatGroups.getOrElseUpdate(groupName, new StringBuilder)
+                  builder
                     .append(IO.read(entries.head._1, utf8) + System.lineSeparator)
                 }
               }
-            } else {
-              val newEntry = Seq.apply(((outputfolder / groupName), groupName))
-              blockNewMappings.synchronized {
-                newMappings = newMappings ++ newEntry
-              }
+              val outputFile = outputfolder / groupName
+              outputFile.relativeTo(webTarget.value)
+              IO.write(outputFile, builder.toString, utf8)
+            }
+            val newEntry = Seq.apply(((outputfolder / groupName), groupName))
+            blockNewMappings.synchronized {
+              newMappings = newMappings ++ newEntry
+
             }
           }
         })
-      Await.ready( Future.sequence(futures), Duration.Inf)
+      Await.ready(Future.sequence(futures), Duration.Inf)
     }
-
-   val futures = concatGroups.map {
-      case (groupName, concatenatedContents) =>
-        Future {
-          val outputFile = outputfolder / groupName
-          outputFile.relativeTo(webTarget.value)
-          val newEntry = Seq.apply((outputFile, groupName))
-          //streams.value.log.info("Entry " + newEntry.toString())
-          blockNewMappings.synchronized {
-            newMappings = newMappings ++ newEntry
-          }
-          IO.write(outputFile, concatenatedContents.toString(), utf8)
-      }
-    }
-
-    Await.ready( Future.sequence(futures), Duration.Inf)
 
     (mappings.toSet -- reducedMappings.toSet ++ newMappings.toSet).toSeq
   }
