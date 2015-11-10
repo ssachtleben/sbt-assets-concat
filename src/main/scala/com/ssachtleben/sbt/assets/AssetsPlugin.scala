@@ -2,6 +2,7 @@ package com.ssachtleben.sbt.assets
 
 import java.nio.charset.Charset
 
+import akka.dispatch.ThreadPoolConfig
 import com.typesafe.sbt.web.pipeline.Pipeline
 import com.typesafe.sbt.web.{PathMapping, SbtWeb}
 import sbt.Keys._
@@ -10,6 +11,9 @@ import sbt._
 import scala.collection.immutable.ListMap
 import scala.collection.mutable
 import scala.collection.mutable.ListBuffer
+import scala.concurrent.ExecutionContext.Implicits.global
+import scala.concurrent.duration.Duration
+import scala.concurrent.{Await, Future}
 
 
 object Import {
@@ -81,10 +85,14 @@ object AssetsPlugin extends sbt.AutoPlugin {
     streams.value.log.info(s"Building ${groupsValue.size} concat group(s)")
     //TODO only write groups when sources have changed
 
-
+    val blockNewMappings = Boolean.box(true)
     if (groupsValue.size > 0) {
-      groupsValue.foreach {
-        case (groupName, fileNames) =>
+      val blockReducedMappings = Boolean.box(true)
+      val futures = groupsValue.map((tuple: (String, Iterable[String])) =>
+        Future {
+          val groupName = tuple._1
+          val fileNames = tuple._2
+
           if (fileNames.size > 0) {
             val groupFile = (outputfolder / groupName)
             var changed = false
@@ -95,7 +103,7 @@ object AssetsPlugin extends sbt.AutoPlugin {
                 0L
               }
             }
-
+            //Read of modifiedDate from source files to check for a change
             fileNames.foreach { fileName =>
               //TODO call mappings filter only one time - for performance ...
               val entries = mappings.filter(f => {
@@ -104,11 +112,14 @@ object AssetsPlugin extends sbt.AutoPlugin {
               if (!entries.isEmpty) {
                 if (entries.head._1.lastModified() > lastModified)
                   changed = true
-                reducedMappings = reducedMappings ++ entries
+                blockReducedMappings.synchronized {
+                  reducedMappings = reducedMappings ++ entries
+                }
               }
             }
 
             if (changed) {
+              // Write fileContent to concatGroups Map
               fileNames.foreach { fileName =>
                 //TODO call mappings filter only one time
                 val entries = mappings.filter(f => {
@@ -117,26 +128,36 @@ object AssetsPlugin extends sbt.AutoPlugin {
                 if (!entries.isEmpty) {
                   //streams.value.log.info("Concat " + groupName + " <- " + entries.head._1)
                   concatGroups.getOrElseUpdate(groupName, new StringBuilder)
-                    .append(IO.read(entries.head._1,utf8) + System.lineSeparator)
+                    .append(IO.read(entries.head._1, utf8) + System.lineSeparator)
                 }
               }
             } else {
               val newEntry = Seq.apply(((outputfolder / groupName), groupName))
-              newMappings = newMappings ++ newEntry
+              blockNewMappings.synchronized {
+                newMappings = newMappings ++ newEntry
+              }
             }
           }
+        })
+      Await.ready( Future.sequence(futures), Duration.Inf)
+    }
+
+   val futures = concatGroups.map {
+      case (groupName, concatenatedContents) =>
+        Future {
+          val outputFile = outputfolder / groupName
+          outputFile.relativeTo(webTarget.value)
+          val newEntry = Seq.apply((outputFile, groupName))
+          //streams.value.log.info("Entry " + newEntry.toString())
+          blockNewMappings.synchronized {
+            newMappings = newMappings ++ newEntry
+          }
+          IO.write(outputFile, concatenatedContents.toString(), utf8)
       }
     }
 
-    concatGroups.map {
-      case (groupName, concatenatedContents) =>
-        val outputFile = outputfolder / groupName
-        val newEntry = Seq.apply((outputFile, groupName))
-        //streams.value.log.info("Entry " + newEntry.toString())
-        newMappings = newMappings ++ newEntry
-        IO.write(outputFile, concatenatedContents.toString(),utf8)
-        outputFile
-    }.pair(relativeTo(webTarget.value))
+    Await.ready( Future.sequence(futures), Duration.Inf)
+
     (mappings.toSet -- reducedMappings.toSet ++ newMappings.toSet).toSeq
   }
 }
